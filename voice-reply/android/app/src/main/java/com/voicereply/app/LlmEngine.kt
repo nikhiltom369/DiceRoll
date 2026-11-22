@@ -12,10 +12,8 @@ import java.util.concurrent.Executors
  */
 object LlmEngine {
 
-    const val SYSTEM_PROMPT =
-        "Du bist ein freundlicher Gesprächspartner. Der Nutzer spricht Deutsch mit dir, " +
-            "und deine Antwort wird laut vorgelesen. Antworte immer auf Deutsch, kurz und natürlich, " +
-            "meist in 1 bis 3 Sätzen. Benutze keine Emojis, keine Listen und kein Markdown."
+    // Instructions for the AI. Same file is used by the CI test (desktop_test.cpp).
+    private var systemPrompt = ""
 
     private const val CONTEXT_TOKENS = 2048
     private const val MAX_REPLY_TOKENS = 160
@@ -34,6 +32,7 @@ object LlmEngine {
 
     suspend fun load(context: Context, model: File) = withContext(aiThread) {
         if (handle != 0L) return@withContext
+        systemPrompt = context.assets.open("system_prompt.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
         if (!nativeReady) {
             System.loadLibrary("voicereply")
             nativeInit(context.applicationInfo.nativeLibraryDir)
@@ -45,7 +44,7 @@ object LlmEngine {
         check(h != 0L) {
             "The AI could not start. Close other apps to free memory, then try again."
         }
-        nativeReset(h, SYSTEM_PROMPT.toByteArray(Charsets.UTF_8))
+        nativeReset(h, systemPrompt.toByteArray(Charsets.UTF_8))
         conversation.clear()
         handle = h
     }
@@ -57,7 +56,7 @@ object LlmEngine {
     }
 
     suspend fun newConversation() = withContext(aiThread) {
-        if (handle != 0L) nativeReset(handle, SYSTEM_PROMPT.toByteArray(Charsets.UTF_8))
+        if (handle != 0L) nativeReset(handle, systemPrompt.toByteArray(Charsets.UTF_8))
         conversation.clear()
     }
 

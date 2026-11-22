@@ -13,10 +13,13 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = "2.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
             // Practically every Android phone today is 64-bit ARM.
+            // CI adds x86_64 (-PwithX86) to run the device test on an emulator.
             abiFilters += listOf("arm64-v8a")
+            if (project.hasProperty("withX86")) abiFilters += listOf("x86_64")
         }
         externalNativeBuild {
             cmake {
@@ -64,4 +67,7 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

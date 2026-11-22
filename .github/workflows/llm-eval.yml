@@ -1,24 +1,21 @@
 name: AI model test
 
+# Builds the app's chat engine (llama.cpp) on a PC, downloads the same model
+# the app downloads, and checks it holds a German conversation.
+
 on:
   push:
     paths:
       - "voice-reply/android/app/src/main/cpp/**"
+      - "voice-reply/android/app/src/main/assets/**"
+      - "voice-reply/android/app/src/main/java/com/voicereply/app/ModelStore.kt"
       - ".github/workflows/llm-eval.yml"
   workflow_dispatch:
 
 jobs:
   talk:
-    name: German chat test (${{ matrix.repo }})
+    name: German chat test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - repo: ggml-org/gemma-4-E2B-it-GGUF
-          - repo: unsloth/gemma-4-E2B-it-qat-mobile-GGUF
-          - repo: ggml-org/Qwen3.5-0.8B-GGUF
-          - repo: ggml-org/gemma-3-1b-it-GGUF
     steps:
       - uses: actions/checkout@v4
 
@@ -27,27 +24,16 @@ jobs:
           cmake -S voice-reply/android/app/src/main/cpp -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target llm_test -j4
 
-      - name: Pick and download model file (no login)
-        env:
-          REPO: ${{ matrix.repo }}
+      - name: Download the app's model (no login)
         run: |
-          curl -s "https://huggingface.co/api/models/$REPO" | jq '{gated, license: (.cardData.license // null)}'
-          FILES=$(curl -s "https://huggingface.co/api/models/$REPO/tree/main" \
-            | jq -r '.[] | select(.path | endswith(".gguf")) | "\((.lfs.size // .size)) \(.path)"')
-          echo "$FILES"
-          FILE=""
-          for p in Q4_K_M Q4_0 Q4_K_S Q4 Q8_0; do
-            FILE=$(echo "$FILES" | awk '{print $2}' | grep -i -- "$p" | grep -vi mmproj | head -1)
-            [ -n "$FILE" ] && break
-          done
-          echo "CHOSEN FILE: $FILE"
-          echo "URL: https://huggingface.co/$REPO/resolve/main/$FILE"
-          curl -fL --retry 3 -o model.gguf "https://huggingface.co/$REPO/resolve/main/$FILE"
+          URL=$(grep -oE 'https://huggingface.co/[^"]+\.gguf' voice-reply/android/app/src/main/java/com/voicereply/app/ModelStore.kt)
+          echo "URL: $URL"
+          curl -fL --retry 3 -o model.gguf "$URL"
           ls -la model.gguf
 
       - name: German conversation
         run: |
-          ./build/llm_test model.gguf \
+          ./build/llm_test model.gguf voice-reply/android/app/src/main/assets/system_prompt.txt \
             "Hallo! Wie geht es dir heute?" \
             "Ich heiße Max und ich lerne Deutsch. Kannst du mir einen Tipp geben?" \
             "Was kann man am Wochenende in Berlin machen?" \
