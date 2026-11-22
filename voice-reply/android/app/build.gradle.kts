@@ -11,13 +11,37 @@ android {
         applicationId = "com.voicereply.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+
+        ndk {
+            // Practically every Android phone today is 64-bit ARM.
+            abiFilters += listOf("arm64-v8a")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += "-DCMAKE_BUILD_TYPE=Release"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path("src/main/cpp/CMakeLists.txt")
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+        }
+    }
+
+    // The AI's CPU libraries are loaded from the app's library folder at
+    // runtime, so they must be unpacked on install.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 
@@ -40,5 +64,4 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

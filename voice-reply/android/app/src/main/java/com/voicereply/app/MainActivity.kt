@@ -1,91 +1,63 @@
 package com.voicereply.app
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.MediaPlayer
-import android.media.MediaRecorder
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.util.Base64
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import android.view.View
-import android.webkit.MimeTypeMap
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.core.content.IntentCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.io.IOException
-import java.util.concurrent.TimeUnit
+import java.util.Locale
 
 /**
- * One screen: record (or pick / share) German audio, send it to the server,
- * show what was heard + the German reply, and play the reply in your voice.
+ * Everything happens on the phone, no accounts or keys:
+ * phone speech recognition (German) -> offline AI -> phone's German voice.
  */
 class MainActivity : AppCompatActivity() {
 
-    private data class Turn(val role: String, val text: String)
-
-    private class ServerReply(val transcript: String, val reply: String, val audio: ByteArray)
-
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .build()
-
-    private val history = mutableListOf<Turn>()
-    private var recorder: MediaRecorder? = null
-    private var player: MediaPlayer? = null
-    private var busy = false
-
-    private lateinit var recordingFile: File
-    private lateinit var replyFile: File
+    private lateinit var models: ModelStore
+    private var recognizer: SpeechRecognizer? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var listening = false
+    private var thinking = false
+    private var downloadWatcher: Job? = null
 
     private lateinit var statusText: TextView
     private lateinit var conversationText: TextView
     private lateinit var conversationScroll: ScrollView
-    private lateinit var recordButton: Button
-    private lateinit var pickButton: Button
+    private lateinit var talkButton: Button
     private lateinit var replayButton: Button
     private lateinit var newChatButton: Button
-    private lateinit var settingsPanel: LinearLayout
-    private lateinit var serverUrlInput: EditText
-    private lateinit var tokenInput: EditText
-
-    private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
+    private lateinit var setupPanel: LinearLayout
+    private lateinit var setupText: TextView
+    private lateinit var setupButton: Button
+    private lateinit var progressBar: LinearProgressIndicator
+    private lateinit var voiceButton: Button
 
     private val askMicPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startRecording()
-            else setStatus("The app needs microphone permission to record you.")
-        }
-
-    private val pickAudio =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) sendUri(uri)
+            if (granted) startListening()
+            else setStatus("The app needs microphone permission to hear you.")
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,325 +68,296 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         conversationText = findViewById(R.id.conversationText)
         conversationScroll = findViewById(R.id.conversationScroll)
-        recordButton = findViewById(R.id.recordButton)
-        pickButton = findViewById(R.id.pickButton)
+        talkButton = findViewById(R.id.talkButton)
         replayButton = findViewById(R.id.replayButton)
         newChatButton = findViewById(R.id.newChatButton)
-        settingsPanel = findViewById(R.id.settingsPanel)
-        serverUrlInput = findViewById(R.id.serverUrlInput)
-        tokenInput = findViewById(R.id.tokenInput)
+        setupPanel = findViewById(R.id.setupPanel)
+        setupText = findViewById(R.id.setupText)
+        setupButton = findViewById(R.id.setupButton)
+        progressBar = findViewById(R.id.progressBar)
+        voiceButton = findViewById(R.id.voiceButton)
         applySystemBarPadding()
 
-        recordingFile = File(cacheDir, "recording.m4a")
-        replyFile = File(cacheDir, "reply.mp3")
+        models = ModelStore(this)
 
-        serverUrlInput.setText(serverUrl())
-        tokenInput.setText(appToken())
-        if (serverUrl().isEmpty()) {
-            settingsPanel.visibility = View.VISIBLE
-            setStatus("First, enter your server URL and app token.")
-        }
-
-        findViewById<Button>(R.id.settingsButton).setOnClickListener {
-            settingsPanel.visibility =
-                if (settingsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
-        findViewById<Button>(R.id.saveButton).setOnClickListener { saveSettings() }
-        recordButton.setOnClickListener {
-            if (recorder == null) onRecordPressed() else stopRecordingAndSend()
-        }
-        pickButton.setOnClickListener { pickAudio.launch("audio/*") }
-        replayButton.setOnClickListener { play(replyFile) }
+        talkButton.setOnClickListener { if (listening) recognizer?.stopListening() else onTalkPressed() }
+        replayButton.setOnClickListener { lastReply()?.let { speak(it) } }
         newChatButton.setOnClickListener {
-            history.clear()
-            stopPlayback()
-            renderConversation()
-            updateButtons()
-            setStatus("New conversation started.")
+            lifecycleScope.launch {
+                tts?.stop()
+                LlmEngine.newConversation()
+                renderConversation()
+                setStatus("New conversation started.")
+            }
         }
+        setupButton.setOnClickListener {
+            models.startDownload()
+            watchDownload()
+        }
+        voiceButton.setOnClickListener { installGermanVoice() }
 
-        savedInstanceState?.getString(KEY_HISTORY)?.let { restoreHistory(it) }
+        tts = TextToSpeech(this) { status -> onTtsReady(status == TextToSpeech.SUCCESS) }
+
         renderConversation()
-        updateButtons()
-
-        // Audio shared from another app (only on first start, not on re-creation).
-        if (savedInstanceState == null) handleShareIntent(intent)
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleShareIntent(intent)
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putString(KEY_HISTORY, historyJson())
+        prepareAi()
     }
 
     override fun onStop() {
         super.onStop()
-        // Android does not allow recording in the background, so cancel it.
-        if (recorder != null) {
-            releaseRecorder()
-            setStatus("Recording cancelled.")
-        }
+        if (listening) recognizer?.cancel()
+        listening = false
+        updateButtons()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        releaseRecorder()
-        stopPlayback()
+        recognizer?.destroy()
+        tts?.shutdown()
     }
 
-    // ---- Recording -----------------------------------------------------------
+    // ---- Step 1: make sure the AI model is on the phone and loaded -----------
 
-    private fun onRecordPressed() {
-        if (busy) return
+    private fun prepareAi() {
+        when {
+            LlmEngine.isLoaded -> {
+                setupPanel.visibility = View.GONE
+                setStatus("Ready. Tap the button and speak German.")
+                updateButtons()
+            }
+            models.isReady() -> loadAi()
+            models.isDownloading() -> watchDownload()
+            else -> showSetup(
+                "One-time setup: the app needs to download its offline AI " +
+                    "(${ModelStore.MODEL_NAME}, ${ModelStore.MODEL_SIZE_TEXT}). " +
+                    "Wi-Fi is best. After that it works without any account."
+            )
+        }
+    }
+
+    private fun showSetup(message: String) {
+        setupPanel.visibility = View.VISIBLE
+        setupText.text = message
+        setupButton.visibility = View.VISIBLE
+        progressBar.visibility = View.GONE
+        setStatus("")
+        updateButtons()
+    }
+
+    private fun watchDownload() {
+        setupPanel.visibility = View.VISIBLE
+        setupButton.visibility = View.GONE
+        progressBar.visibility = View.VISIBLE
+        setupText.text = "Downloading the offline AI… You can leave the app; it keeps downloading."
+        downloadWatcher?.cancel()
+        downloadWatcher = lifecycleScope.launch {
+            while (true) {
+                when (val p = models.poll()) {
+                    is ModelStore.Progress.Running -> {
+                        if (p.total > 0) {
+                            progressBar.isIndeterminate = false
+                            progressBar.setProgressCompat((p.done * 100 / p.total).toInt(), true)
+                            setStatus("Downloaded ${p.done / 1_000_000} of ${p.total / 1_000_000} MB")
+                        } else {
+                            progressBar.isIndeterminate = true
+                            setStatus("Starting download…")
+                        }
+                    }
+                    ModelStore.Progress.Waiting -> setStatus("Waiting for internet…")
+                    ModelStore.Progress.Done -> {
+                        loadAi()
+                        return@launch
+                    }
+                    is ModelStore.Progress.Failed -> {
+                        showSetup("❌ ${p.reason}")
+                        setupButton.text = getString(R.string.retry_download)
+                        return@launch
+                    }
+                }
+                delay(700)
+            }
+        }
+    }
+
+    private fun loadAi() {
+        setupPanel.visibility = View.VISIBLE
+        setupButton.visibility = View.GONE
+        progressBar.visibility = View.VISIBLE
+        progressBar.isIndeterminate = true
+        setupText.text = "Starting the offline AI…"
+        setStatus("")
+        lifecycleScope.launch {
+            try {
+                LlmEngine.load(applicationContext, models.modelFile)
+                setupPanel.visibility = View.GONE
+                setStatus("Ready. Tap the button and speak German.")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                showSetup("❌ ${e.message ?: "The AI could not start."}")
+                setupButton.text = getString(R.string.retry_download)
+            }
+            updateButtons()
+        }
+    }
+
+    // ---- Step 2: listen (phone's own speech recognition, German) --------------
+
+    private fun onTalkPressed() {
+        if (thinking || !LlmEngine.isLoaded) return
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        if (granted) startRecording() else askMicPermission.launch(Manifest.permission.RECORD_AUDIO)
+        if (granted) startListening() else askMicPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    private fun startRecording() {
-        stopPlayback()
-        val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaRecorder(this)
-        } else {
-            @Suppress("DEPRECATION")
-            MediaRecorder()
-        }
-        try {
-            r.setAudioSource(MediaRecorder.AudioSource.MIC)
-            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            r.setAudioChannels(1)
-            r.setAudioSamplingRate(44_100)
-            r.setAudioEncodingBitRate(96_000)
-            r.setOutputFile(recordingFile.absolutePath)
-            r.prepare()
-            r.start()
-        } catch (e: Exception) {
-            r.release()
-            setStatus("Could not start recording: ${e.message}")
+    private fun startListening() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            setStatus("This phone has no speech recognition. Install or update the Google app, then try again.")
             return
         }
-        recorder = r
+        tts?.stop()
+        val r = recognizer ?: SpeechRecognizer.createSpeechRecognizer(this).also {
+            it.setRecognitionListener(listener)
+            recognizer = it
+        }
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "de-DE")
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "de-DE")
+            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        listening = true
         updateButtons()
-        setStatus("🔴 Recording… speak German, then tap \"Stop and send\".")
+        setStatus("🎤 Listening… speak German.")
+        r.startListening(intent)
     }
 
-    private fun stopRecordingAndSend() {
-        val r = recorder ?: return
-        recorder = null
-        // stop() throws if almost nothing was recorded.
-        val ok = try {
-            r.stop()
-            true
-        } catch (e: RuntimeException) {
-            false
+    private val listener = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() {
+            setStatus("…")
         }
-        r.release()
-        updateButtons()
-        if (!ok || !recordingFile.exists() || recordingFile.length() == 0L) {
-            setStatus("Recording was too short. Try again.")
-            return
-        }
-        send(recordingFile.readBytes(), "recording.m4a", "audio/mp4")
-    }
+        override fun onEvent(eventType: Int, params: Bundle?) {}
 
-    private fun releaseRecorder() {
-        recorder?.let { r ->
-            try {
-                r.stop()
-            } catch (e: RuntimeException) {
-                // nothing was recorded yet; ignore
+        override fun onPartialResults(partialResults: Bundle?) {
+            val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+            if (!text.isNullOrBlank()) setStatus("🎤 $text")
+        }
+
+        override fun onResults(results: Bundle?) {
+            listening = false
+            val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+            if (text.isNullOrEmpty()) {
+                setStatus("I didn't catch that. Tap and try again.")
+                updateButtons()
+            } else {
+                answer(text)
             }
-            r.release()
         }
-        recorder = null
-        updateButtons()
-    }
 
-    // ---- Audio from a file or another app --------------------------------------
-
-    private fun handleShareIntent(intent: Intent?) {
-        if (intent == null || intent.action != Intent.ACTION_SEND) return
-        val uri = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java) ?: return
-        intent.action = null // handle it only once
-        sendUri(uri)
-    }
-
-    private fun sendUri(uri: Uri) {
-        if (busy || recorder != null) return
-        lifecycleScope.launch {
-            val bytes = try {
-                withContext(Dispatchers.IO) {
-                    contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        override fun onError(error: Int) {
+            listening = false
+            updateButtons()
+            setStatus(
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
+                        "I didn't catch that. Tap and try again."
+                    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                    SpeechRecognizer.ERROR_SERVER ->
+                        "Speech recognition needs internet (or the offline German speech pack in your phone's settings)."
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+                        "The app needs microphone permission."
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
+                        "Speech recognition is busy. Try again in a moment."
+                    12, 13 -> // ERROR_LANGUAGE_NOT_SUPPORTED, ERROR_LANGUAGE_UNAVAILABLE (Android 12+)
+                        "German speech recognition isn't installed. Add German in your phone's " +
+                            "Google voice typing settings, then try again."
+                    else -> "Speech recognition error ($error). Tap and try again."
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                null
-            }
-            when {
-                bytes == null || bytes.isEmpty() -> setStatus("Could not read that audio file.")
-                bytes.size > MAX_UPLOAD_BYTES -> setStatus("That file is too big (max 25 MB).")
-                else -> {
-                    val mime = contentResolver.getType(uri) ?: "application/octet-stream"
-                    val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "bin"
-                    send(bytes, "audio.$ext", mime)
-                }
-            }
+            )
         }
     }
 
-    // ---- Talking to the server ---------------------------------------------------
+    // ---- Step 3: think (offline AI) and speak (phone's German voice) ----------
 
-    private fun send(bytes: ByteArray, fileName: String, mime: String) {
-        val url = serverUrl()
-        if (url.isEmpty()) {
-            settingsPanel.visibility = View.VISIBLE
-            setStatus("Enter your server URL in Settings first.")
-            return
-        }
-        busy = true
+    private fun answer(userText: String) {
+        thinking = true
         updateButtons()
-        setStatus("⏳ Listening and thinking…")
-        val historyJson = historyJson()
-
+        LlmEngine.conversation.add(true to userText)
+        renderConversation()
+        setStatus("💭 Thinking…")
         lifecycleScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    val r = postAudio(url, bytes, fileName, mime, historyJson)
-                    replyFile.writeBytes(r.audio)
-                    r
-                }
-                history.add(Turn("user", result.transcript))
-                history.add(Turn("assistant", result.reply))
+                val reply = cleanForSpeech(LlmEngine.reply(userText))
+                    .ifEmpty { "Entschuldigung, das habe ich nicht verstanden." }
+                LlmEngine.conversation.add(false to reply)
                 renderConversation()
-                setStatus("🔊 Playing the reply.")
-                play(replyFile)
+                setStatus(if (ttsReady) "🔊 Speaking…" else "Reply ready (no German voice installed).")
+                speak(reply)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                setStatus("❌ ${e.message ?: e.javaClass.simpleName}")
+            } catch (e: Throwable) {
+                setStatus("❌ ${e.message ?: "The AI had a problem."}")
             } finally {
-                busy = false
+                thinking = false
                 updateButtons()
             }
         }
     }
 
-    private fun postAudio(
-        baseUrl: String,
-        bytes: ByteArray,
-        fileName: String,
-        mime: String,
-        historyJson: String,
-    ): ServerReply {
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("audio", fileName, bytes.toRequestBody(mime.toMediaTypeOrNull()))
-            .addFormDataPart("history", historyJson)
-            .build()
-        val request = Request.Builder()
-            .url(baseUrl.trimEnd('/') + "/reply")
-            .apply { if (appToken().isNotEmpty()) header("X-App-Token", appToken()) }
-            .post(body)
-            .build()
+    private fun cleanForSpeech(text: String): String =
+        text.replace(Regex("[*#_`]"), "").replace(Regex("\\s+"), " ").trim()
 
-        return http.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
-                throw IOException(
-                    if (detail.isNullOrBlank()) "Server error (HTTP ${response.code})" else detail
-                )
-            }
-            val json = JSONObject(text)
-            ServerReply(
-                transcript = json.getString("transcript"),
-                reply = json.getString("reply"),
-                audio = Base64.decode(json.getString("audio_base64"), Base64.DEFAULT),
-            )
+    private fun onTtsReady(ok: Boolean) {
+        val engine = tts
+        if (!ok || engine == null) {
+            ttsReady = false
+            voiceButton.visibility = View.VISIBLE
+            return
         }
+        val result = engine.setLanguage(Locale.GERMANY)
+        ttsReady = result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED
+        voiceButton.visibility = if (ttsReady) View.GONE else View.VISIBLE
+        updateButtons()
     }
 
-    private fun checkServer() {
-        val url = serverUrl()
-        if (url.isEmpty()) return
-        setStatus("Checking the server…")
-        lifecycleScope.launch {
-            val message = try {
-                withContext(Dispatchers.IO) {
-                    val request = Request.Builder().url(url.trimEnd('/') + "/health").build()
-                    http.newCall(request).execute().use { r ->
-                        if (!r.isSuccessful) {
-                            "⚠ Server answered with HTTP ${r.code}."
-                        } else {
-                            val j = JSONObject(r.body?.string().orEmpty())
-                            val missing = listOf(
-                                "anthropic_key_set" to "Anthropic API key",
-                                "elevenlabs_key_set" to "ElevenLabs API key",
-                                "voice_id_set" to "voice ID",
-                            ).filter { !j.optBoolean(it.first) }.map { it.second }
-                            if (missing.isEmpty()) "✅ Connected. The server is ready."
-                            else "⚠ Connected, but the server is missing: ${missing.joinToString()}."
-                        }
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                "❌ Can't reach the server: ${e.message}"
-            }
-            setStatus(message)
-        }
+    private fun speak(text: String) {
+        if (!ttsReady) return
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "reply")
     }
 
-    // ---- Playback ----------------------------------------------------------------
-
-    private fun play(file: File) {
-        if (!file.exists()) return
-        stopPlayback()
+    private fun installGermanVoice() {
         try {
-            player = MediaPlayer().apply {
-                setDataSource(file.absolutePath)
-                setOnCompletionListener { stopPlayback() }
-                prepare()
-                start()
-            }
-        } catch (e: Exception) {
-            stopPlayback()
-            setStatus("Could not play the reply: ${e.message}")
+            startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA))
+        } catch (e: ActivityNotFoundException) {
+            setStatus("Open your phone's Settings → Text-to-speech and add a German voice.")
         }
     }
 
-    private fun stopPlayback() {
-        player?.release()
-        player = null
-    }
+    // ---- UI helpers ---------------------------------------------------------------
 
-    // ---- UI helpers --------------------------------------------------------------
+    private fun lastReply(): String? = LlmEngine.conversation.lastOrNull { !it.first }?.second
 
     private fun updateButtons() {
-        val recording = recorder != null
-        recordButton.text = getString(if (recording) R.string.stop_and_send else R.string.record)
-        recordButton.isEnabled = !busy
-        pickButton.isEnabled = !busy && !recording
-        newChatButton.isEnabled = !busy && !recording
-        replayButton.isEnabled = !busy && !recording && history.isNotEmpty() && replyFile.exists()
+        val ready = LlmEngine.isLoaded && !thinking
+        talkButton.isEnabled = ready
+        talkButton.text = getString(if (listening) R.string.stop_listening else R.string.talk)
+        replayButton.isEnabled = ready && !listening && ttsReady && lastReply() != null
+        newChatButton.isEnabled = ready && !listening
     }
 
     private fun renderConversation() {
-        conversationText.text = if (history.isEmpty()) {
+        conversationText.text = if (LlmEngine.conversation.isEmpty()) {
             getString(R.string.empty_conversation)
         } else {
-            history.joinToString("\n\n") { turn ->
-                (if (turn.role == "user") "🗣 You: " else "🔊 Reply: ") + turn.text
+            LlmEngine.conversation.joinToString("\n\n") { (isUser, text) ->
+                (if (isUser) "🗣 You: " else "🔊 Reply: ") + text
             }
         }
         conversationScroll.post { conversationScroll.fullScroll(View.FOCUS_DOWN) }
+        updateButtons()
     }
 
     private fun setStatus(message: String) {
@@ -425,55 +368,9 @@ class MainActivity : AppCompatActivity() {
         val root = findViewById<View>(R.id.root)
         val base = root.paddingLeft
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
-            val bars = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
-            )
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(base + bars.left, base + bars.top, base + bars.right, base + bars.bottom)
             insets
         }
-    }
-
-    // ---- Settings & state ----------------------------------------------------------
-
-    private fun serverUrl(): String = prefs.getString(KEY_URL, null).orEmpty().trim()
-
-    private fun appToken(): String = prefs.getString(KEY_TOKEN, null).orEmpty()
-
-    private fun saveSettings() {
-        var url = serverUrlInput.text.toString().trim()
-        if (url.isNotEmpty() && !url.startsWith("http://") && !url.startsWith("https://")) {
-            url = "https://$url"
-        }
-        serverUrlInput.setText(url)
-        prefs.edit()
-            .putString(KEY_URL, url)
-            .putString(KEY_TOKEN, tokenInput.text.toString().trim())
-            .apply()
-        settingsPanel.visibility = View.GONE
-        Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
-        checkServer()
-    }
-
-    private fun historyJson(): String {
-        val array = JSONArray()
-        history.forEach { array.put(JSONObject().put("role", it.role).put("text", it.text)) }
-        return array.toString()
-    }
-
-    private fun restoreHistory(json: String) {
-        runCatching {
-            val array = JSONArray(json)
-            for (i in 0 until array.length()) {
-                val o = array.getJSONObject(i)
-                history.add(Turn(o.getString("role"), o.getString("text")))
-            }
-        }
-    }
-
-    private companion object {
-        const val KEY_URL = "server_url"
-        const val KEY_TOKEN = "app_token"
-        const val KEY_HISTORY = "history"
-        const val MAX_UPLOAD_BYTES = 25 * 1024 * 1024
     }
 }

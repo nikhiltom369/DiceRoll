@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">VoiceReply DE</string>
-    <string name="settings">Settings</string>
-    <string name="server_url_hint">Server URL (e.g. https://my-server.onrender.com)</string>
-    <string name="app_token_hint">App token (same as APP_TOKEN on the server)</string>
-    <string name="save_and_test">Save and test connection</string>
-    <string name="record">Tap and speak German</string>
-    <string name="stop_and_send">Stop and send</string>
-    <string name="pick_file">Pick audio file</string>
-    <string name="replay">Play reply again</string>
+    <string name="download_ai">Download offline AI</string>
+    <string name="retry_download">Download again</string>
+    <string name="install_voice">Install a German voice for replies</string>
+    <string name="talk">Tap and speak German</string>
+    <string name="stop_listening">Done speaking</string>
+    <string name="replay">Say it again</string>
     <string name="new_conversation">New conversation</string>
-    <string name="empty_conversation">Tap the button and say something in German, or pick a German audio file. You can also share a voice message from WhatsApp to this app.</string>
+    <string name="empty_conversation">Tap the big button and say something in German. The app answers in German, out loud.\n\nEverything runs on your phone. No account needed.</string>
 </resources>

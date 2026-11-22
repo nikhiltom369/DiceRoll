@@ -1,5 +1,0 @@
-anthropic>=2.12,<3
-elevenlabs>=2.79,<3
-fastapi>=0.115
-uvicorn[standard]>=0.30
-python-multipart>=0.0.9

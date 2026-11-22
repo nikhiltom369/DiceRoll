@@ -23,20 +23,19 @@ set(LLAMA_OPENSSL        OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE       OFF CACHE BOOL "" FORCE)
 
 if(ANDROID)
-    # Same settings as llama.cpp's own Android example: one CPU backend per
-    # ARM feature level, picked at runtime, so it runs fast on any phone.
+    # Like llama.cpp's own Android example: one CPU backend per ARM feature
+    # level, picked at runtime, so it runs fast on any phone. OpenMP is off so
+    # the app never depends on an extra libomp.so (ggml's own thread pool is used).
     set(BUILD_SHARED_LIBS      ON  CACHE BOOL "" FORCE)
     set(GGML_NATIVE            OFF CACHE BOOL "" FORCE)
     set(GGML_BACKEND_DL        ON  CACHE BOOL "" FORCE)
     set(GGML_CPU_ALL_VARIANTS  ON  CACHE BOOL "" FORCE)
+    set(GGML_OPENMP            OFF CACHE BOOL "" FORCE)
+    set(GGML_CPU_KLEIDIAI      OFF CACHE BOOL "" FORCE)
     if(ANDROID_ABI STREQUAL "arm64-v8a")
-        set(GGML_SYSTEM_ARCH  "ARM")
-        set(GGML_CPU_KLEIDIAI ON)
-        set(GGML_OPENMP       ON)
+        set(GGML_SYSTEM_ARCH "ARM")
     else()
-        set(GGML_SYSTEM_ARCH  "x86")
-        set(GGML_CPU_KLEIDIAI OFF)
-        set(GGML_OPENMP       OFF)
+        set(GGML_SYSTEM_ARCH "x86")
     endif()
 else()
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)

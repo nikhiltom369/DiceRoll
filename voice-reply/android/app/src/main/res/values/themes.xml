@@ -2,6 +2,7 @@
 <resources>
     <style name="Theme.VoiceReply" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/brand</item>
+        <item name="colorOnPrimary">@android:color/white</item>
     </style>
     <color name="brand">#2E6BE6</color>
     <color name="ic_launcher_background">#2E6BE6</color>
