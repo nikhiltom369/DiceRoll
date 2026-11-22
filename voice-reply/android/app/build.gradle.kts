@@ -34,6 +34,17 @@ android {
         }
     }
 
+    // Fixed debug key (standard "android" passwords), so every CI build is
+    // signed the same way and a new APK installs over the old one.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
