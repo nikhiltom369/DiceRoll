@@ -11,6 +11,8 @@ jobs:
   apk:
     name: Build Android APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # to publish the APK as a release download
     defaults:
       run:
         working-directory: voice-reply/android
@@ -34,6 +36,19 @@ jobs:
           name: VoiceReply-apk
           path: voice-reply/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      # Direct download link (no login, no zip):
+      # https://github.com/<owner>/<repo>/releases/download/voice-reply-latest/VoiceReply-DE.apk
+      - name: Publish APK as "voice-reply-latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk VoiceReply-DE.apk
+          gh release delete voice-reply-latest --yes --cleanup-tag || true
+          gh release create voice-reply-latest VoiceReply-DE.apk \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "VoiceReply DE (latest build)" \
+            --notes "Debug APK built from ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}. Install it on your phone (allow 'Install unknown apps')."
 
   server-tests:
     name: Server tests
